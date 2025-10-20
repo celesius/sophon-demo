@@ -16,6 +16,7 @@
 #include "ff_decode.hpp"
 #include "opencv2/opencv.hpp"
 #include "scrfd.hpp"
+#include "arcface.hpp"
 using namespace std;
 #define USE_OPENCV_DECODE 0
 
@@ -37,7 +38,11 @@ int main(int argc, char* argv[]) {
       "{help | 0 | print help information.}"
       "{eval | False | if true then gen result_txt}"
       "{input | ../../datasets/test/ | input path, images direction or video "
-      "file path}";
+      "file path}"
+      "{arc_bmodel | ../../models/BM1684/w600k_r50_f16_bm1688.bmodel | arcface bmodel file path}"
+      "{gallery | ../../datasets/gallery/ | face feature gallery dir}"
+      "{sim_thresh | 0.38 | face feature cosine similarity threshold}"
+      ;
   cv::CommandLineParser parser(argc, argv, keys);
   if (parser.get<bool>("help")) {
     parser.printMessage();
@@ -47,6 +52,13 @@ int main(int argc, char* argv[]) {
   string input = parser.get<string>("input");
   int dev_id = parser.get<int>("dev_id");
   bool eval = parser.get<bool>("eval");
+  //arcface params
+  //--arc_bmodel<path>
+	//--gallery<dir>
+	//--sim_thresh 0.38
+  string arcface_bmodel = parser.get<string>("arc_bmodel");
+  string gallery = parser.get<string>("gallery");
+  float sim_thresh = parser.get<float>("sim_thresh");
 
   // check params
   struct stat info;
@@ -63,11 +75,16 @@ int main(int argc, char* argv[]) {
   auto handle = sail::Handle(dev_id);
   sail::Bmcv bmcv(handle);  // for imwrite
   cout << "set device id: " << dev_id << endl;
-
+  
+  // initialize arcface
+  ArcFaceBM arcface(dev_id, arcface_bmodel, gallery);
+  CV_Assert(0 == arcface.Init(sim_thresh));
+  
   // initialize net
   Scrfd scrfd(dev_id, bmodel_file);
   CV_Assert(0 == scrfd.Init(parser.get<float>("conf_thresh"),
                             parser.get<float>("nms_thresh")));
+
 
   // profiling
   TimeStamp scrfd_ts;
@@ -220,7 +237,7 @@ int main(int argc, char* argv[]) {
               printf("draw_opencv\n");
               scrfd.draw_opencv(boxes, cvmats[i]);
 #else
-              printf("draw_bmcv\n");
+              //printf("draw_bmcv\n");
               scrfd.draw_bmcv(pti, b_box.score, int(x1), int(y1),
                               int(bbox_width), int(bbox_height), batch_imgs[i],
                               false, true);

@@ -10,18 +10,20 @@
 #ifndef SCRFD_H
 #define SCRFD_H
 
+#include <iostream>
+#include <vector>
+#include "opencv2/opencv.hpp"
+#include "bmnn_utils.h"
+#include "utils.hpp"
+#include "bm_wrapper.hpp"
+
 #include <dirent.h>
 
 #include <algorithm>
-#include <iostream>
-#include <vector>
+#include <cstring>
 
-#include "bm_wrapper.hpp"
-#include "bmnn_utils.h"
-#include "cvwrapper.h"
-#include "engine.h"
-#include "utils.hpp"
 // Define USE_OPENCV for enabling OPENCV related funtions in bm_wrapper.hpp
+#define USE_OPENCV 1
 #define DEBUG 0
 
 struct ScrfdBox {
@@ -82,20 +84,11 @@ struct anchor_cfg {
 using ScrfdBoxVec = std::vector<cvai_face_info_t>;
 
 class Scrfd {
-  std::shared_ptr<sail::Engine> engine;
-  std::shared_ptr<sail::Bmcv> bmcv;
-  std::vector<std::string> graph_names;
-  std::vector<std::string> input_names;
-  std::vector<int> input_shape;  // 1 input
-  std::vector<std::string> output_names;
-  std::vector<std::vector<int>> output_shape;  // 9 outputs
-  bm_data_type_t input_dtype;
-  bm_data_type_t output_dtype;
-  std::shared_ptr<sail::Tensor> input_tensor;
-  std::vector<std::shared_ptr<sail::Tensor>> output_tensor;
-  std::map<std::string, sail::Tensor*> input_tensors;
-  std::map<std::string, sail::Tensor*> output_tensors;
-  
+  std::shared_ptr<BMNNContext> m_bmContext;
+  std::shared_ptr<BMNNNetwork> m_bmNetwork;
+  std::vector<bm_image> m_resized_imgs;
+  std::vector<bm_image> m_converto_imgs;
+
   // configuration
   float m_confThreshold = 0.5;
   float m_nmsThreshold = 0.5;
@@ -103,17 +96,17 @@ class Scrfd {
   int m_net_h, m_net_w;
   int max_batch;
   int min_dim;
-  float ab[6];
+  int output_num;
+  bmcv_convert_to_attr converto_attr;
 
   TimeStamp* m_ts;
+
   std::vector<float> rescale_params;
   std::vector<cvai_face_info_t> res;
 
  private:
-  int pre_process(sail::BMImage& input);
-  template <std::size_t N>
-  int pre_process(std::vector<sail::BMImage>& input);
-  int post_process(std::vector<sail::BMImage>& images,
+  int pre_process(const std::vector<bm_image>& input);
+  int post_process(const std::vector<bm_image>& images,
                    std::vector<ScrfdBoxVec>& detected_boxes);
   std::vector<std::vector<float>> generate_mmdet_base_anchors(
       float base_size, float center_offset, const std::vector<float>& ratios,
@@ -135,17 +128,17 @@ class Scrfd {
                                 bool* pIsAligWidth);
 
  public:
-  Scrfd(int dev_id, std::string bmodel_file);
+  Scrfd(std::shared_ptr<BMNNContext> context);
   virtual ~Scrfd();
   int Init(float confThresh = 0.5, float nmsThresh = 0.5);
   void enableProfile(TimeStamp* ts);
   int batch_size();
-  int Detect(std::vector<sail::BMImage>& images,
+  int Detect(const std::vector<bm_image>& images,
              std::vector<ScrfdBoxVec>& boxes);
-  void draw_opencv(std::vector<cvai_face_info_t>& res, cv::Mat& frame);
-  void draw_bmcv(cvai_pts_t five_point, float conf, int left, int top,
-                 int width, int height, sail::BMImage& frame,
-                 bool put_text_flag = false, bool draw_point_flag = false);
+  void drawPred(std::vector<cvai_face_info_t>& res, cv::Mat& frame);
+  void draw_bmcv(bm_handle_t& handle, cvai_pts_t five_point, float conf,
+                 int left, int top, int width, int height, bm_image& frame,
+                 bool put_text_flag, bool draw_point_flag);
   void readDirectory(const std::string& directory,
                      std::vector<std::string>& files_vector, bool recursive);
 };

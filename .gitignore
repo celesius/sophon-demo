@@ -1,0 +1,42 @@
+# ---- Build & Binary ----
+build/
+bin/
+out/
+*.o
+*.a
+*.so
+*.exe
+
+# ---- IDE & Editor ----
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ---- Logs & Temp ----
+*.log
+*.tmp
+__pycache__/
+*.pyc
+*.pyo
+
+# ---- Models & Datasets ----
+models/
+datasets/
+*.bmodel
+*.onnx
+*.pth
+*.pt
+sample/RetinaFace/data/
+
+# ---- Images & Debug Dumps ----
+debug_bmimg/
+*.bmimg
+*.jpg
+*.png
+
+# ---- Misc ----
+.DS_Store
+*.bak
+*.old
