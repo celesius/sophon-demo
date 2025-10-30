@@ -434,7 +434,7 @@ bool ArcFaceBM::BuildGallery(const std::string& root,bm_handle_t& bm_h , Scrfd& 
         printf("get image %s from picDec\n", path.c_str());
         // === 检测单人脸 ===
         //std::vector<cvai_bbox_t> boxes;
-        //bool det_ok = detector.DetectOne(img_bgr, boxes);  // 替换为你项目中的检测调用
+        //bool det_ok = detector.DetectOne(img_bgr, boxes);  
         std::vector<bm_image> batch_imgs;
         std::vector<ScrfdBoxVec> batch_boxes;
         batch_imgs.push_back(bmimg);
