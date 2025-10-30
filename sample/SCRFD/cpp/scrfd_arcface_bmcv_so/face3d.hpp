@@ -83,9 +83,6 @@ class Face3D {
     // 设备侧对齐 -> RGB PLANAR F32 (1x3x192x192)
     bool align_to_192_bm(bm_image& src_bgr, const FaceBox& box, bm_image& aligned_rgb_f32, Affine2x3& M, Affine2x3& IM) const;
 
-    // 推理（bm_image->bmrt）
-    bool forward_fc1(const bm_image& aligned_rgb_f32, std::vector<float>& fc1);
-
     // fc1 -> 68×3；用 IM 将 2D 从裁剪映回原图
     bool fc1_to_3d68(const std::vector<float>& fc1, const Affine2x3& IM, std::array<Point3f, 68>& pts3d, std::array<Point3f, 68>& pts3d_crop) const;
 

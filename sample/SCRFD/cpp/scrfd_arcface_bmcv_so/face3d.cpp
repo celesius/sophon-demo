@@ -447,6 +447,9 @@ void Face3D::umeyama_3d3d(const Vec3d* X, const Vec3d* Y, int n, float& s, Mat3d
 bool Face3D::align_to_192_bm(bm_image& src_bgr_in, const FaceBox& box,
                              bm_image& aligned_rgb_f32,  // 输出：RGB planar F32 (192x192)
                              Affine2x3& M, Affine2x3& IM) const {
+    
+    //dump_bm_image_info("[Face3D] src_bgr_in", src_bgr_in);
+    
     const int S = cfg_.input_size;  // 192
     // 1) 计算仿射 M、IM（与 InsightFace 一致）
     const float cx = 0.5f * (box.x1 + box.x2);
@@ -464,11 +467,13 @@ bool Face3D::align_to_192_bm(bm_image& src_bgr_in, const FaceBox& box,
     invertAffine(M, IM);
 
     // 2) 确保与本 sdk 的 handle 一致
+    /*
     bm_image src_same;
     if (!ensure_image_on_handle(const_cast<bm_image&>(src_bgr_in), handle_, src_same)) {
         printf("[Face3D] ensure_image_on_handle failed\n");
         return false;
     }
+    */
 
     // 3) 把输入统一成 RGB_PLANAR + U8（warp_affine 支持最好的格式）
     bm_image_format_info fmt_rgbp;
@@ -476,7 +481,7 @@ bool Face3D::align_to_192_bm(bm_image& src_bgr_in, const FaceBox& box,
     bm_image_data_format_ext dtype_u8 = DATA_TYPE_EXT_1N_BYTE;
 
     bm_image src_u8_rgb;  // 中间图（与 src_same 同尺寸）
-    if (bm_image_create(handle_, src_same.height, src_same.width, fmt_rgbp.image_format, dtype_u8, &src_u8_rgb) != BM_SUCCESS) {
+    if (bm_image_create(handle_, src_bgr_in.height, src_bgr_in.width, fmt_rgbp.image_format, dtype_u8, &src_u8_rgb) != BM_SUCCESS) {
         printf("[Face3D] bm_image_create src_u8_rgb failed\n");
         return false;
     }
@@ -495,7 +500,7 @@ bool Face3D::align_to_192_bm(bm_image& src_bgr_in, const FaceBox& box,
     to_u8.alpha_2 = 1.f;
     to_u8.beta_2 = 0.f;
 
-    bm_status_t ret = bmcv_image_convert_to(handle_, 1, to_u8, const_cast<bm_image*>(&src_same), &src_u8_rgb);
+    bm_status_t ret = bmcv_image_convert_to(handle_, 1, to_u8, const_cast<bm_image*>(&src_bgr_in ), &src_u8_rgb);
     if (ret != BM_SUCCESS) {
         printf("[Face3D] convert_to -> RGB_PLANAR U8 failed, ret=%d\n", ret);
         bm_image_destroy(src_u8_rgb);
@@ -503,6 +508,7 @@ bool Face3D::align_to_192_bm(bm_image& src_bgr_in, const FaceBox& box,
     }
 
     // 4) 准备 warp 目标：RGB_PLANAR + U8, 192x192
+    /*
     bm_image tmp_u8_rgb;
     if (bm_image_create(handle_, S, S, FORMAT_RGB_PLANAR, dtype_u8, &tmp_u8_rgb) != BM_SUCCESS) {
         printf("[Face3D] bm_image_create tmp_u8_rgb failed\n");
@@ -515,6 +521,24 @@ bool Face3D::align_to_192_bm(bm_image& src_bgr_in, const FaceBox& box,
         bm_image_destroy(tmp_u8_rgb);
         return false;
     }
+    */
+
+    // 7) 初始化输出图
+    //if (bm_image_create(handle_, S, S, FORMAT_RGB_PLANAR, DATA_TYPE_EXT_1N_BYTE, &aligned_rgb_f32) != BM_SUCCESS) {
+    if (bm_image_create(handle_, S, S, src_u8_rgb.image_format, dtype_u8, &aligned_rgb_f32) != BM_SUCCESS) {
+        printf("[Face3D] bm_image_create aligned_rgb_f32 failed\n");
+        bm_image_destroy(src_u8_rgb);
+        //bm_image_destroy(tmp_u8_rgb);
+        return false;
+    }
+    if (bm_image_alloc_dev_mem(aligned_rgb_f32, BMCV_HEAP1_ID) != BM_SUCCESS) {
+        printf("[Face3D] alloc aligned_rgb_f32 dev mem failed\n");
+        bm_image_destroy(src_u8_rgb);
+        //bm_image_destroy(tmp_u8_rgb);
+        bm_image_destroy(aligned_rgb_f32);
+        return false;
+    }
+
 
     // 5) 组装 affine 矩阵（BMCV 的新版接口）
     bmcv_affine_image_matrix mat_img {};
@@ -531,24 +555,28 @@ bool Face3D::align_to_192_bm(bm_image& src_bgr_in, const FaceBox& box,
     // 6) 做 warp（RGB_PLANAR U8 -> RGB_PLANAR U8）
 
 
-    bm_status_t rrrr =  bm_image_write_to_bmp(src_u8_rgb, "/home/linaro/src_u8_rgb.bmp");
-    printf("II [Face3D][DEBUG] bm_image_write_to_bmp src_u8_rgb ret=%d\n", rrrr);
+    //bm_status_t rrrr =  bm_image_write_to_bmp(src_u8_rgb, "/home/linaro/src_u8_rgb.bmp");
+    //printf("II [Face3D][DEBUG] bm_image_write_to_bmp src_u8_rgb ret=%d\n", rrrr);
 
-    ret = bmcv_image_warp_affine(handle_, /*matrix_num=*/1, &mat_img, &src_u8_rgb, &tmp_u8_rgb,
+    //ret = bmcv_image_warp_affine(handle_, /*matrix_num=*/1, &mat_img, &src_u8_rgb, &tmp_u8_rgb,
+    ret = bmcv_image_warp_affine(handle_, /*matrix_num=*/1, &mat_img, &src_u8_rgb, &aligned_rgb_f32,
+    //ret = bmcv_image_warp_affine(handle_, /*matrix_num=*/1, &mat_img, &src_bgr_in, &aligned_rgb_f32,
                                  /*use_bilinear=*/1);
     if (ret != BM_SUCCESS) {
         printf("[Face3D] warp_affine failed, ret=%d\n", ret);
         dump_bm_image_info("[Face3D] src_u8_rgb", src_u8_rgb);
-        dump_bm_image_info("[Face3D] tmp_u8_rgb", tmp_u8_rgb);
+        //dump_bm_image_info("[Face3D] tmp_u8_rgb", tmp_u8_rgb);
         bm_image_destroy(src_u8_rgb);
-        bm_image_destroy(tmp_u8_rgb);
+        bm_image_destroy(aligned_rgb_f32);
+        //bm_image_destroy(tmp_u8_rgb);
         return false;
     }
 
-    rrrr =  bm_image_write_to_bmp(tmp_u8_rgb, "/home/linaro/tmp_u8_rgb.bmp");
-    printf("II [Face3D][DEBUG] bm_image_write_to_bmp tmp_u8_rgb ret=%d\n", rrrr);
+    //rrrr =  bm_image_write_to_bmp(tmp_u8_rgb, "/home/linaro/tmp_u8_rgb.bmp");
+    //printf("II [Face3D][DEBUG] bm_image_write_to_bmp tmp_u8_rgb ret=%d\n", rrrr);
 
     // 7) 再把 U8 → F32（归一化到 0..1）
+/*
     if (bm_image_create(handle_, S, S, FORMAT_RGB_PLANAR, DATA_TYPE_EXT_1N_BYTE, &aligned_rgb_f32) != BM_SUCCESS) {
         printf("[Face3D] bm_image_create aligned_rgb_f32 failed\n");
         bm_image_destroy(src_u8_rgb);
@@ -562,7 +590,9 @@ bool Face3D::align_to_192_bm(bm_image& src_bgr_in, const FaceBox& box,
         bm_image_destroy(aligned_rgb_f32);
         return false;
     }
+*/
 
+/*
     bmcv_convert_to_attr to_f32 {};
     // 1/1.0 的 alpha = 1.f，若需归一化 0..1，alpha = 1/255.f
     to_f32.alpha_0 = 1.f ;
@@ -580,79 +610,24 @@ bool Face3D::align_to_192_bm(bm_image& src_bgr_in, const FaceBox& box,
         bm_image_destroy(aligned_rgb_f32);
         return false;
     }
+    */
 
     // 清理中间物
     bm_image_destroy(src_u8_rgb);
-    bm_image_destroy(tmp_u8_rgb);
+    //bm_image_destroy(tmp_u8_rgb);
 
-    dump_bm_image_info("[Face3D][DEBUG] aligned image", aligned_rgb_f32);
-    printf("[Face3D][DEBUG] M = [[%.4f %.4f %.4f],[%.4f %.4f %.4f]]\n", M.a00, M.a01, M.a02, M.a10, M.a11, M.a12);
-    printf("[Face3D][DEBUG] IM= [[%.4f %.4f %.4f],[%.4f %.4f %.4f]]\n", IM.a00, IM.a01, IM.a02, IM.a10, IM.a11, IM.a12);
+    //dump_bm_image_info("[Face3D][DEBUG] aligned image", aligned_rgb_f32);
+    //printf("[Face3D][DEBUG] M = [[%.4f %.4f %.4f],[%.4f %.4f %.4f]]\n", M.a00, M.a01, M.a02, M.a10, M.a11, M.a12);
+    //printf("[Face3D][DEBUG] IM= [[%.4f %.4f %.4f],[%.4f %.4f %.4f]]\n", IM.a00, IM.a01, IM.a02, IM.a10, IM.a11, IM.a12);
 
     // 检查中心点映射
-    float cx_ = aligned_rgb_f32.width / 2.0f;
-    float cy_ = aligned_rgb_f32.height / 2.0f;
-    float ox_ = M.a00 * cx_ + M.a01 * cy_ + M.a02;
-    float oy_ = M.a10 * cx_ + M.a11 * cy_ + M.a12;
-    printf("[Face3D][DEBUG] center of aligned (%.1f,%.1f) -> orig (%.1f,%.1f)\n", cx_, cy_, ox_, oy_);
+    //float cx_ = aligned_rgb_f32.width / 2.0f;
+    //float cy_ = aligned_rgb_f32.height / 2.0f;
+    //float ox_ = M.a00 * cx_ + M.a01 * cy_ + M.a02;
+    //float oy_ = M.a10 * cx_ + M.a11 * cy_ + M.a12;
+    //printf("[Face3D][DEBUG] center of aligned (%.1f,%.1f) -> orig (%.1f,%.1f)\n", cx_, cy_, ox_, oy_);
 
     return true;
-}
-
-// ========== 前向推理 ==========
-bool Face3D::forward_fc1(const bm_image& aligned_rgb_f32, std::vector<float>& fc1) {
-    // 这里**完全照抄你们 scrfd.cpp 的 BMRT 调度方式**：
-    // - 如何从 ctx3d_/net_ 取到 bmrt 句柄
-    // - 如何构造输入/输出 bm_tensor_t
-    // - 如何把 bm_image 绑定/拷到输入 tensor
-    // - 如何 launch/extract 输出
-    //
-    // 下面给出“通用 BMRT 写法”，如果你们 scrfd.cpp 有封装（如 BMNNTensor），
-    // 就把这段替换为和 scrfd 完全一致的代码路径。
-    /*
-    // 1) 输入 tensor
-    bm_tensor_t input;
-    int in_shape[4] = { 1, 3, cfg_.input_size, cfg_.input_size };  // 1x3x192x192
-    if (bmrt_tensor(&input, ctx3d_->bmrt(), BM_FLOAT32, 4, in_shape, nullptr) != BM_SUCCESS) {
-        return false;
-    }
-
-    // 将 bm_image 的三平面拷到 input（NCHW 连续内存）。你们若有统一工具，建议直接用：
-    //   utils::bm_image_to_host_f32_planar(aligned_rgb_f32, host.data());
-    // 这里提供基础实现：
-    std::vector<float> host(1 * 3 * cfg_.input_size * cfg_.input_size);
-    {
-        // 注意：这部分按你们工程已有的方法实现（示例留白）
-        // TODO: 从 aligned_rgb_f32 的 3 个 plane 取到 host (RGB planar F32)
-        // 常见做法：bm_image_copy_to_host + 逐 plane memcpy 到 host
-        // host 排布：R(192*192) + G(192*192) + B(192*192)
-    }
-    bm_memcpy_s2d_partial(handle_, input.device_mem, host.data(), host.size() * sizeof(float));
-
-    // 2) 输出 tensor
-    bm_tensor_t output;
-    int out_shape[2] = { 1, 3309 };
-    if (bmrt_tensor(&output, ctx3d_->bmrt(), BM_FLOAT32, 2, out_shape, nullptr) != BM_SUCCESS) {
-        bm_free_device(handle_, input.device_mem);
-        return false;
-    }
-
-    // 3) 执行
-    bm_tensor_t inputs[1] = { input };
-    bm_tensor_t outputs[1] = { output };
-    bool ok = (bmrt_launch_tensor_ex(ctx3d_->bmrt(), net_->name, inputs, 1, outputs, 1, true, false) == BM_SUCCESS);
-
-    if (ok) {
-        fc1.resize(3309);
-        bm_memcpy_d2s_partial(handle_, fc1.data(), output.device_mem, 3309 * sizeof(float));
-    }
-
-    // 4) 释放
-    bm_free_device(handle_, input.device_mem);
-    bm_free_device(handle_, output.device_mem);
-    return ok;
-    */
-   return false;
 }
 
 // ========== fc1 -> 68×3 ==========
@@ -758,8 +733,8 @@ bool Face3D::infer_on_bbox(bm_image& src_bgr, const FaceBox& bbox, Pose3DOut& po
     printf("[Face3D][DEBUG] bbox center=(%.1f, %.1f), size=(%.1f,%.1f)\n", 0.5f * (bbox.x1 + bbox.x2), 0.5f * (bbox.y1 + bbox.y2), bbox.x2 - bbox.x1,
            bbox.y2 - bbox.y1);
 
-    bm_status_t rrrr =  bm_image_write_to_bmp(src_bgr, "/home/linaro/src_debug.bmp");
-    printf("[Face3D][DEBUG] bm_image_write_to_bmp src_bgr ret=%d\n", rrrr);
+    //bm_status_t rrrr =  bm_image_write_to_bmp(src_bgr, "/home/linaro/src_debug.bmp");
+    //printf("[Face3D][DEBUG] bm_image_write_to_bmp src_bgr ret=%d\n", rrrr);
     if (!align_to_192_bm(src_bgr, bbox, aligned, M, IM)){
         printf("align_to_192_bm error\n");
         return false;
@@ -772,8 +747,8 @@ bool Face3D::infer_on_bbox(bm_image& src_bgr, const FaceBox& bbox, Pose3DOut& po
     printf("aligned image: w=%d, h=%d\n", aligned.width, aligned.height);
     printf("aligned image format=%d, dtype=%d\n", aligned.image_format, aligned.data_type);
     
-    rrrr =  bm_image_write_to_bmp(aligned, "/home/linaro/aligned_debug.bmp");
-    printf("[Face3D][DEBUG] bm_image_write_to_bmp ret=%d\n", rrrr);
+    //rrrr =  bm_image_write_to_bmp(aligned, "/home/linaro/aligned_debug.bmp");
+    //printf("[Face3D][DEBUG] bm_image_write_to_bmp ret=%d\n", rrrr);
 
     std::vector<bm_image> imgs = { aligned };
 
