@@ -1,4 +1,4 @@
-#include "arcface.hpp"
+#include "arcface_bm.hpp"
 #include <cassert>
 #include <filesystem>
 #include <iostream>
@@ -10,100 +10,6 @@
 #include <string>
 
 namespace fs = std::filesystem;
-
-// 自动生成下一个 dump 文件名
-// base_dir: 保存目录（如 "debug"）
-// prefix: 文件前缀（如 "dbg_arcface_planar"）
-// suffix: 文件后缀（如 ".bmimg"）
-std::string GetNextDumpFilename(const std::string& base_dir, const std::string& prefix, const std::string& suffix = ".jpg") {
-    if (!fs::exists(base_dir)) {
-        fs::create_directories(base_dir);
-    }
-
-    std::regex pattern(prefix + "_(\\d{4})" + suffix);
-    int max_index = 0;
-
-    for (auto& entry : fs::directory_iterator(base_dir)) {
-        if (!entry.is_regular_file())
-            continue;
-        std::string name = entry.path().filename().string();
-        std::smatch match;
-        if (std::regex_match(name, match, pattern)) {
-            int idx = std::stoi(match[1]);
-            if (idx > max_index)
-                max_index = idx;
-        }
-    }
-
-    int next_index = max_index + 1;
-    char buf[32];
-    snprintf(buf, sizeof(buf), "_%04d", next_index);
-    std::string filename = prefix + buf + suffix;
-
-    return (fs::path(base_dir) / filename).string();
-}
-
-static void DebugCheckBmImageF32RGBPlanar(bm_handle_t h, const bm_image& img, const char* tag = "converto", int sample_hw = 16) {
-    int stride[4];
-    bm_image_get_stride(img, stride);
-    
-    std::cout << "[DBG] " << tag << ": " << img.width << "x" << img.height << " fmt=" << img.image_format  // 期望 FORMAT_RGB_PLANAR
-              << " dtype=" << img.data_type                                                                // 期望 DATA_TYPE_EXT_FLOAT32
-              << " stride0=" << stride[0] << "\n";
-
-    const int H = img.height, W = img.width;
-    const int hw = std::min(sample_hw, H);
-    const int ww = std::min(sample_hw, W);
-
-    // 读取整张显存
-    bm_device_mem_t dev;
-    bm_image_get_device_mem(img, &dev);
-
-    // 分配 host buffer 接收
-    size_t byte_size = W * H * 3 * sizeof(float);
-    std::vector<float> buf(W * H * 3);
-    auto ret = bm_memcpy_d2s_partial(h, buf.data(), dev, byte_size);
-    if (ret != BM_SUCCESS) {
-        std::cerr << "[ERR] bm_memcpy_d2s_partial failed, ret=" << ret << std::endl;
-        return;
-    }
-
-    // 做简单统计
-    bool has_nan = false, has_inf = false;
-    float mn = +1e30f, mx = -1e30f;
-    for (int i = 0; i < hw * ww * 3; ++i) {
-        float v = buf[i];
-        if (!std::isfinite(v)) {
-            has_nan |= std::isnan(v);
-            has_inf |= std::isinf(v);
-        } else {
-            mn = std::min(mn, v);
-            mx = std::max(mx, v);
-        }
-    }
-    std::cout << "   sample [" << hw << "x" << ww << "] min=" << mn << " max=" << mx << " NaN=" << (has_nan ? "YES" : "no")
-              << " Inf=" << (has_inf ? "YES" : "no") << std::endl;
-
-    // 打印前 16 个值看分布
-    std::cout << "   first16:";
-    for (int i = 0; i < std::min(16, (int)buf.size()); ++i)
-        std::cout << " " << buf[i];
-    std::cout << std::endl;
-
-    /*
-    std::cout << " dump all input data to :" << std::endl;
-    for (int c = 0; c < 3; ++c) {
-        std::cout << "  channel " << c << ":" << std::endl;
-        for (int y = 0; y < H; ++y) {
-            for (int x = 0; x < W; ++x) {
-                std::cout << buf[c * W * H + y * W + x] << " ";
-            }
-            std::cout << std::endl;
-        }
-    }
-    std::cout << std::endl;
-    */
-}
 
 static void DebugCheckTensorInOut(BMNNTensor* in, BMNNTensor* out) {
     // 输入张量
@@ -155,6 +61,48 @@ static void DebugCheckTensorInOut(BMNNTensor* in, BMNNTensor* out) {
 static const float kArc5Pts[5][2] = {
     { 38.2946f, 51.6963f }, { 73.5318f, 51.5014f }, { 56.0252f, 71.7366f }, { 41.5493f, 92.3655f }, { 70.7299f, 92.2041f },
 };
+
+
+// 辅助：用 5点最小二乘解 2x3 仿射矩阵
+static void SolveAffine2x3_5pt(const float src[5][2], const float dst[5][2], float M[2][3]) {
+    // 正规方程：A^T A theta = A^T b
+    // theta = [a b tx c d ty]^T
+    double ATA[6][6] = {0}, ATb[6] = {0};
+    auto accum = [&](double x, double y, double xp, double yp) {
+        double rowx[6] = {x, y, 1.0, 0, 0, 0};
+        double rowy[6] = {0, 0, 0,   x, y, 1.0};
+        // 累加
+        for(int r=0;r<6;++r){
+            for(int c=0;c<6;++c){
+                ATA[r][c] += rowx[r]*rowx[c] + rowy[r]*rowy[c];
+            }
+        }
+        for(int r=0;r<6;++r){
+            ATb[r] += rowx[r]*xp + rowy[r]*yp;
+        }
+    };
+    for(int i=0;i<5;++i) accum(src[i][0], src[i][1], dst[i][0], dst[i][1]);
+
+    // 解 6x6 线性方程（高斯消元）
+    int n=6;
+    for(int i=0;i<n;++i){
+        // 选主元
+        int piv=i;
+        for(int r=i+1;r<n;++r) if(fabs(ATA[r][i])>fabs(ATA[piv][i])) piv=r;
+        if(piv!=i){ for(int c=i;c<n;++c) std::swap(ATA[i][c],ATA[piv][c]); std::swap(ATb[i],ATb[piv]); }
+        double div=ATA[i][i]+1e-12;
+        for(int c=i;c<n;++c) ATA[i][c]/=div; ATb[i]/=div;
+        for(int r=0;r<n;++r) if(r!=i){
+            double factor=ATA[r][i];
+            for(int c=i;c<n;++c) ATA[r][c]-=factor*ATA[i][c];
+            ATb[r]-=factor*ATb[i];
+        }
+    }
+    double a=ATb[0], b=ATb[1], tx=ATb[2], c=ATb[3], d=ATb[4], ty=ATb[5];
+    M[0][0]=float(a); M[0][1]=float(b); M[0][2]=float(tx);
+    M[1][0]=float(c); M[1][1]=float(d); M[1][2]=float(ty);
+}
+
 
 ArcFaceBM::ArcFaceBM(std::shared_ptr<BMNNContext> ctx)
     : m_bmContext(std::move(ctx)) {
@@ -238,7 +186,104 @@ int ArcFaceBM::Init(float sim_thresh) {
     return 0;
 }
 
+
+inline bool invert_affine_2x3(const float M[2][3], float Minv[2][3]) {
+    double a=M[0][0], b=M[0][1], tx=M[0][2];
+    double c=M[1][0], d=M[1][1], ty=M[1][2];
+    double det = a*d - b*c;
+    if (fabs(det) < 1e-12) return false;
+
+    double ia =  d/det, ib = -b/det;
+    double ic = -c/det, id =  a/det;
+    double itx = -(ia*tx + ib*ty);
+    double ity = -(ic*tx + id*ty);
+
+    Minv[0][0]=float(ia);  Minv[0][1]=float(ib);  Minv[0][2]=float(itx);
+    Minv[1][0]=float(ic);  Minv[1][1]=float(id);  Minv[1][2]=float(ity);
+    return true;
+}
+
+int ArcFaceBM::AlignBy5PtsBMI(bm_image& src_bmi, const cvai_pts_t& pts, bm_image& dst_rgb112) {
+    //int strides[3] = { FFALIGN(112, 64), FFALIGN(112, 64), FFALIGN(112, 64) };
+    //int ssrc[3] = { FFALIGN(src_bmi.width,64), FFALIGN(src_bmi.width,64), FFALIGN(src_bmi.width,64) };
+
+    // 2) 组 5点
+    float src5[5][2], dst5[5][2];
+    for (int i=0;i<5;++i){ src5[i][0]=pts.x[i]; src5[i][1]=pts.y[i]; }
+    for (int i=0;i<5;++i){ dst5[i][0]=kArc5Pts[i][0]; dst5[i][1]=kArc5Pts[i][1]; }
+
+    // 3) 求 2x3 仿射
+    float M[2][3];
+    SolveAffine2x3_5pt(src5, dst5, M);
+
+    // 1) 中间src图像 
+    bm_image src_aligned;
+    bm_image_create(m_bmContext->handle(), src_bmi.height, src_bmi.width, FORMAT_RGB_PLANAR, src_bmi.data_type, &src_aligned, NULL);
+    bm_image_alloc_dev_mem(src_aligned, BMCV_IMAGE_FOR_IN);
+    bmcv_image_storage_convert(m_bmContext->handle(), 1, &src_bmi, &src_aligned);
+
+    // 4) 最终输出图像 
+    //auto ret = bm_image_create(m_bmContext->handle(), src_aligned.height, src_aligned.width, src_aligned.image_format, src_aligned.data_type, &dst_rgb112, NULL);
+    auto ret = bm_image_create(m_bmContext->handle(), 112, 112, src_aligned.image_format, src_aligned.data_type, &dst_rgb112, NULL);
+    if (ret != BM_SUCCESS) return -1;
+    //bm_image_alloc_dev_mem(dst_rgb112, BMCV_HEAP1_ID);
+    if(bm_image_alloc_dev_mem(dst_rgb112, BMCV_IMAGE_FOR_IN) != BM_SUCCESS){
+        printf("[ArcFace] alloc dst_rgb112 dev mem failed");
+        bm_image_destroy(dst_rgb112);
+        return -1;
+    }
+
+    /*
+    if (!(src_bmi.image_format == FORMAT_RGB_PLANAR && src_bmi.data_type == DATA_TYPE_EXT_1N_BYTE)) {
+        bm_image tmp;
+        int s2[3] = { FFALIGN(src_bmi.width,64), FFALIGN(src_bmi.width,64), FFALIGN(src_bmi.width,64) };
+        bm_image_create(m_bmContext->handle(), src_bmi.height, src_bmi.width, FORMAT_RGB_PLANAR,
+                        DATA_TYPE_EXT_1N_BYTE, &tmp, s2);
+        bm_image_alloc_dev_mem(tmp, BMCV_HEAP1_ID);
+        // 颜色/打包转换
+        bmcv_image_storage_convert(m_bmContext->handle(), 1, &src_bmi, &tmp);
+        src_aligned = tmp;
+    }
+    */
+
+    float IM[2][3];
+    if (!invert_affine_2x3(M, IM)) {
+        std::cerr << "AlignBy5PtsBMI: invert_affine_2x3 failed\n";
+        //if (src_aligned.data != src_bmi.data) bm_image_destroy(src_aligned);
+        return -1;
+    }
+    // 5) 仿射到 112×112
+    bmcv_affine_image_matrix aff_img{};
+    aff_img.matrix_num = 1;
+
+    bmcv_affine_matrix mat{};
+    // 将计算得到的 2x3 仿射矩阵 M 赋值给 bmcv_affine_matrix 的成员
+    mat.m[0] = IM[0][0];                                   // 第一行第一列
+    mat.m[1] = IM[0][1];                                   // 第一行第二列
+    mat.m[2] = IM[0][2];                                   // 第一行第三列（平移量 tx）
+    mat.m[3] = IM[1][0];                                   // 第二行第一列
+    mat.m[4] = IM[1][1];                                   // 第二行第二列
+    mat.m[5] = IM[1][2];                                   // 第二行第三列（平移量 ty）
+    aff_img.matrix = &mat;
+
+    //bm_status_t result_write =  bm_image_write_to_bmp(src_aligned, "/home/linaro/src_aligned.bmp");
+    //printf("II [Face3D][DEBUG] bm_image_write_to_bmp src_aligned ret=%d\n", result_write );
+
+    ret = bmcv_image_warp_affine(m_bmContext->handle(), 1, &aff_img, &src_aligned, &dst_rgb112, 0);
+    if (ret != BM_SUCCESS) {
+        printf("[ArcFace] warp_affine failed, ret=%d\n", ret);
+        return -1;
+    }
+
+    //result_write =  bm_image_write_to_bmp(dst_rgb112 , "/home/linaro/dst_rgb112.bmp");
+    //printf("II [Face3D][DEBUG] bm_image_write_to_bmp dst_rgb112.bmp ret=%d\n", result_write );
+    
+    return (ret==BM_SUCCESS)?0:-1;
+}
+
+
 // 把整图 + 5点直接透视到 112×112（不需要先 crop，warpAffine 内部会取正确区域）
+/*
 cv::Mat ArcFaceBM::AlignBy5PtsRGB(const cv::Mat& bgr, const cvai_pts_t& pts, int out_w, int out_h) {
     // 构造 src/dst
     cv::Mat src(5, 2, CV_32F);
@@ -261,8 +306,10 @@ cv::Mat ArcFaceBM::AlignBy5PtsRGB(const cv::Mat& bgr, const cvai_pts_t& pts, int
     cv::warpAffine(rgb, aligned, M, aligned.size(), cv::INTER_LINEAR, cv::BORDER_CONSTANT, cv::Scalar(0, 0, 0));
     return aligned;
 }
+*/
 
-bool ArcFaceBM::UploadAndPreprocess(cv::Mat& rgb112, bm_image& out_converto){
+//bool ArcFaceBM::UploadAndPreprocess(cv::Mat& rgb112, bm_image& out_converto){
+bool ArcFaceBM::UploadAndPreprocess(bm_image& rgb112, bm_image& out_converto){
     
     /*
     if (rgb112.empty() || rgb112.cols != m_net_w || rgb112.rows != m_net_h || rgb112.channels() != 3)
@@ -304,9 +351,9 @@ bool ArcFaceBM::UploadAndPreprocess(cv::Mat& rgb112, bm_image& out_converto){
     out_converto = m_converto_imgs[0];
     */
     std::vector<bm_image> input_images;
-    bm_image _bmimg;
-    cv::bmcv::toBMI(rgb112, &_bmimg);
-    input_images.push_back(_bmimg);
+    //bm_image _bmimg;
+    //cv::bmcv::toBMI(rgb112, &_bmimg);
+    input_images.push_back(rgb112);
     this->pre_process( input_images );
 
     return true;
@@ -353,7 +400,7 @@ std::vector<float> ArcFaceBM::InferenceOnce(){
     return feat;
 }
 
-std::vector<float> ArcFaceBM::Forward112RGB(cv::Mat& rgb112) {
+std::vector<float> ArcFaceBM::Forward112RGB(bm_image& rgb112) {
     bm_image conv;
     if (!UploadAndPreprocess(rgb112, conv))
         return {};
@@ -372,10 +419,10 @@ std::vector<float> ArcFaceBM::Forward112RGB(cv::Mat& rgb112) {
     return feat;
 }
 
-std::vector<float> ArcFaceBM::Forward112BGR(const cv::Mat& bgr112){
-    cv::Mat rgb;
-    cv::cvtColor(bgr112, rgb, cv::COLOR_BGR2RGB);
-    return Forward112RGB(rgb);
+std::vector<float> ArcFaceBM::Forward112BGR(bm_image & bgr112){
+    //cv::Mat rgb;
+    //cv::cvtColor(bgr112, rgb, cv::COLOR_BGR2RGB);
+    return Forward112RGB(bgr112);
 }
 
 float ArcFaceBM::CosineSim(const std::vector<float>& a, const std::vector<float>& b) {
@@ -425,13 +472,17 @@ bool ArcFaceBM::BuildGallery(const std::string& root,bm_handle_t& bm_h , Scrfd& 
     for (auto& item : files) {
         const std::string& person = item.first;
         std::string& path = item.second;
-        cv::Mat img_bgr = cv::imread(path);
+        
         //if (img_bgr.empty())
         //    continue;
         bm_image bmimg;
         printf("will read bm_image %s \n", path.c_str());
-        picDec(bm_h , path.c_str(), bmimg);
+        //picDec(bm_h , path.c_str(), bmimg);
+        bm_handle_t hh = m_bmContext->handle();
+        picDec(hh, path.c_str(), bmimg);
         printf("get image %s from picDec\n", path.c_str());
+        //bm_status_t rrrr =  bm_image_write_to_bmp(bmimg, "/home/linaro/bmimg.bmp");
+        //printf("II [Face3D][DEBUG] bm_image_write_to_bmp bmimg ret=%d\n", rrrr);
         // === 检测单人脸 ===
         //std::vector<cvai_bbox_t> boxes;
         //bool det_ok = detector.DetectOne(img_bgr, boxes);  
@@ -448,7 +499,6 @@ bool ArcFaceBM::BuildGallery(const std::string& root,bm_handle_t& bm_h , Scrfd& 
         
         //CV_Assert(0 == detector.Detect(batch_imgs, batch_boxes));
         ScrfdBoxVec boxes = batch_boxes[0]; 
-        bm_image_destroy(batch_imgs[0]);
         printf("bm_image_destroy done\n");
         if (boxes.empty()) {
             std::cerr << "[Gallery] no face: " << path << std::endl;
@@ -474,12 +524,19 @@ bool ArcFaceBM::BuildGallery(const std::string& root,bm_handle_t& bm_h , Scrfd& 
         const auto& face = boxes[best_idx];
         if (!face.pts.x || face.pts.size < 5)
             continue;
-        printf("face pts got\n");
+        printf("face pts got hhhhhhhh \n");
         // === 5点对齐并前向 ===
-        cv::Mat rgb112 = ArcFaceBM::AlignBy5PtsRGB(img_bgr, face.pts, 112, 112);
+        bm_image rgb112;
+        //bm_status_t rrrr =  bm_image_write_to_bmp(bmimg, "/home/linaro/bmimg.bmp");
+        //printf("II [Face3D][DEBUG] bm_image_write_to_bmp bmimg ret=%d\n", rrrr);
+        int rrr =  AlignBy5PtsBMI(bmimg, face.pts, rgb112);
+        //rrrr =  bm_image_write_to_bmp(rgb112, "/home/linaro/rgb112.bmp");
+        //printf("II [Face3D][DEBUG] bm_image_write_to_bmp rgb112 ret=%d\n", rrrr);
+
         printf("AlignBy5PtsRGB done\n");
-        if (rgb112.empty())
-            continue;
+        bm_image_destroy(batch_imgs[0]);
+        //if (rgb112.empty())
+        //    continue;
         /*
         path = path + "_aligned.jpg";
         cv::Mat save_mat;
@@ -487,6 +544,8 @@ bool ArcFaceBM::BuildGallery(const std::string& root,bm_handle_t& bm_h , Scrfd& 
         cv::imwrite(path, save_mat);
         */ 
         std::vector<float> feat = this->Forward112BGR(rgb112);
+
+        bm_image_destroy(rgb112);
         /*
         std::cout << "feat: ";
         for (size_t i = 0; i < feat.size(); i++) {
@@ -636,4 +695,48 @@ float ArcFaceBM::get_aspect_scaled_ratio(int src_w, int src_h, int dst_w, int ds
     ratio = r_h;
   }
   return ratio;
+}
+
+
+/**
+ * @brief ArcFaceBM 批量推理接口
+ * @param input 输入图像列表，要求每个图像已经是全此缓存 RGB
+ * @param output 输出arcface_data 列表, 每个列表中包含人名和sim结果
+ * @return 成功返回 true，失败返回 false
+ * 函数内部实现整个人脸识别流程：预处理、前向、特征归一化、与图库比对，最终输出识别结果
+*/
+bool ArcFaceBM::arcface_inference(bm_image& input, const ScrfdBoxVec& detected_boxes, std::vector<arcface_data>& output)
+{
+    output.clear();
+    //获得矫正后的人脸图像列表
+    for (const auto& box : detected_boxes) {
+        bm_image rgb112;
+        int rrr =  AlignBy5PtsBMI(input, box.pts, rgb112);
+        if (rrr != 0) {
+            std::cerr << "[arcface_inference] AlignBy5PtsBMI failed\n";
+            continue;
+        }
+        arcface_data afd;
+        afd.bbox = box.bbox;
+        //output.push_back(afd);
+
+        std::vector <float> feat = this->Forward112RGB(rgb112);
+        bm_image_destroy(rgb112);
+        if (feat.size() != 512) {
+            std::cerr << "[arcface_inference] Forward112RGB failed\n";
+            continue;
+        }
+        // 与图库比对
+        std::string best_name;
+        float best_sim;
+        if (!this->MatchGallery(feat, best_name, best_sim)) {
+            std::cerr << "[arcface_inference] MatchGallery failed\n";
+            continue;
+        }
+        afd.person_name = best_name;
+        afd.sim = best_sim;
+        output.push_back(afd);
+    }
+
+    return true; 
 }

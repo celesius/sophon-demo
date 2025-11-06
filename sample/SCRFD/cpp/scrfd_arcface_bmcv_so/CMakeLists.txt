@@ -48,7 +48,14 @@ include_directories(${PUBLIC_INCLUDE_DIR})
 
 # ---- 源码收集 ----
 # 你的对外 API 头文件建议放到 PUBLIC_INCLUDE_DIR 下，库内部实现放 src 列表
-aux_source_directory(. SRC_FILES)
+#aux_source_directory(. SRC_FILES)
+
+set(SRC_FILES ./arcface_bm.cpp
+               ./scrfd.cpp
+               ./scrfd_adapter.cpp
+               ./face3d.cpp
+               )
+
 aux_source_directory(../dependencies/src/ SRC_FILES)
 
 # ---- 目标名统一为 scrfd（不同架构可用不同 OUTPUT_NAME）----

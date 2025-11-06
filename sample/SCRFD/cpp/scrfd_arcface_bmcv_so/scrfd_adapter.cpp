@@ -1,5 +1,5 @@
 #include "scrfd.hpp"
-#include "arcface.hpp"
+#include "arcface_bm.hpp"
 #include "face3d.hpp"
 
 // Adapter that bridges to the user's existing implementation in scrfd.hpp/scrfd.cpp
@@ -33,7 +33,7 @@ namespace {
         cv::Mat mat(iv.height, iv.width, type, const_cast<uint8_t*>(iv.data), iv.stride);
         return mat.clone();  // clone to ensure data ownership
     }
-        */
+    */
 
     static void pack_rows(const uint8_t* src, int h, int row_bytes, int stride, std::vector<uint8_t>& tight) {
         tight.resize(static_cast<size_t>(h) * row_bytes);
@@ -250,7 +250,9 @@ struct Impl {
         printf("face3d initialized\n");
       // profiling
       //TimeStamp* ts = &scrfd_ts;
-      det->enableProfile(&scrfd_ts);
+        det->enableProfile(&scrfd_ts);
+        bm_handle_t h = handle->handle();
+        arcface->BuildGallery(gallery_path, h, *det, score_thresh);
 
       printf("1 det pointer: %p\n", static_cast<void*>(det.get()));
       // get batch_size
@@ -323,7 +325,8 @@ struct Impl {
     return faces;
   }
   */
-  std::vector<Face> run_from_view(const ImageView& iv, float score, float nms, Landmarks3DOut& lmk_out) {
+  std::vector<Face> run_from_view(const ImageView& iv, float score, float nms, Landmarks3DOut& lmk_out, bool is_arcface = false,  bool is_face3d = false )
+  { 
       std::vector<Face> faces;
       if (!iv.data || iv.width <= 0 || iv.height <= 0)
           return faces;
@@ -394,6 +397,38 @@ struct Impl {
           faces.push_back(make_face(cvf));
       }
 
+      if (is_arcface == false && is_face3d == false){
+          return faces;
+      }
+
+      // 6) ArcFace 推理
+      if (is_arcface == true) {
+
+          // arcface图像
+            bm_image arcface_image;
+            if (ensure_image_on_handle(input_images[0], arc_ctx->handle(), arcface_image)) {
+                  printf("ensure_image_on_handle success\n");
+            } else {
+                  printf("ensure_image_on_handle failed\n");
+            }
+          // arcface推理
+            std::vector<arcface_data> arcface_results;
+            bool ret_af = arcface->arcface_inference(arcface_image, batch_boxes[0], arcface_results);
+            if (ret_af) {
+                    for (const auto& res : arcface_results) {
+                        printf("Person: %s, Sim: %.4f\n", res.person_name.c_str(), res.sim);
+                    }
+            } else {
+                    printf("ArcFace infer failed!\n");
+            }
+            bm_image_destroy(arcface_image);
+      }
+
+      if (is_face3d == false){
+        return faces;
+      }
+
+        // 6) Face3D 推理
       std::vector<face3d::FaceBox> face_boxes;
         for (auto& f : faces) {
             face3d::FaceBox box;
@@ -407,8 +442,8 @@ struct Impl {
 
         face3d::Pose3DOut pose_out;
         bm_image face3d_image;
-        
-        if(ensure_image_on_handle(input_images[0], face3d_ctx->handle(), face3d_image)){
+        if(ensure_image_on_handle(input_images[0], face3d_ctx->handle(), face3d_image))
+        {
             printf("ensure_image_on_handle success\n");
         }else{
             printf("ensure_image_on_handle failed\n");
@@ -425,10 +460,10 @@ struct Impl {
         }
 
       return faces;
-  }
+    }
 };
 
-} // namespace
+}
 
 Detector* Detector::create(const std::string& model_path, int device_id) {
   auto* p = new Detector();
@@ -486,11 +521,12 @@ void Detector::destroy(Detector*& ptr) {
 }
 
 Faces_Landmarks Detector::detect(const ImageView& img, float score_thresh, float nms_iou) {
-  auto* impl = static_cast<Impl*>(impl_);
-  if (!impl) return {};
+    auto* impl = static_cast<Impl*>(impl_);
+    if (!impl)
+        return {};
     Landmarks3DOut lmk_out;
-  
-  std::vector<Face> faces = impl->run_from_view(img, score_thresh, nms_iou, lmk_out);
+
+    std::vector<Face> faces = impl->run_from_view(img, score_thresh, nms_iou, lmk_out, false, true);
     Faces_Landmarks result;
     result.faces = faces;
     std::vector<Face_3D_Landmark> lmk3d_vec;
@@ -502,8 +538,8 @@ Faces_Landmarks Detector::detect(const ImageView& img, float score_thresh, float
         lmk3d_vec.push_back(lmk3d);
     }
     result.landmarks3d = lmk3d_vec;
-  
-  return result;
+
+    return result;
 }
 
 std::vector<Face> Detector::detect_from_file(const std::string& image_path, float score_thresh, float nms_iou) {

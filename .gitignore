@@ -40,3 +40,4 @@ debug_bmimg/
 .DS_Store
 *.bak
 *.old
+*.gz

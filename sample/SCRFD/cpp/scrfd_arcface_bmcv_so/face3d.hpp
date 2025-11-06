@@ -5,13 +5,11 @@
 #include <vector>
 #include <dirent.h>
 #include <algorithm>
-#include "opencv2/opencv.hpp"
 
+#include <cassert>
+#include <set>
 #include "bmnn_utils.h"
 #include "bmcv_api_ext.h"
-#include "bmruntime_interface.h"
-#include "utils.hpp"
-#include "bm_wrapper.hpp"
 
 namespace face3d {
 

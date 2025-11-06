@@ -3,13 +3,21 @@
 #include <cmath>
 #include <cstring>
 #include <fstream>
-#include <cassert>
 #include <string>
 
 
-#include "bmcv_api_ext.h"
 #include "bmlib_runtime.h"
 #include "bmcv_api.h"
+#include "bmruntime_interface.h"
+#include "utils.hpp"
+#include "bm_wrapper.hpp"
+#include "bmnn_utils.h"
+
+
+#ifdef FFALIGN
+#undef FFALIGN
+#endif
+#define FFALIGN(x, a) (((x) + (a) - 1) & ~((a) - 1))
 
 
 using namespace face3d;
@@ -899,7 +907,7 @@ int Face3D::pre_process(std::vector<bm_image>& images) {
   ret = bmcv_image_convert_to(m_bmContext->handle(), image_n, converto_attr,
                               //m_resized_imgs.data(), m_converto_imgs.data());
                               images.data(), m_converto_imgs.data());
-  CV_Assert(ret == 0);
+  assert(ret == 0);
 
   // 3. attach to tensor
   if (image_n != max_batch) image_n = m_bmNetwork->get_nearest_batch(image_n);
@@ -913,7 +921,7 @@ int Face3D::pre_process(std::vector<bm_image>& images) {
 
 std::vector<float> Face3D::InferenceOnce(){
     int ret = m_bmNetwork->forward();
-    CV_Assert(ret == 0);
+    assert(ret == 0);
 
     std::shared_ptr<BMNNTensor> out = m_bmNetwork->outputTensor(0);
     //std::cout << "[DBG] outputTensor is on device=" << out->is_device() << std::endl;
